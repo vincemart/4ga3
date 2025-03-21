@@ -1,0 +1,129 @@
+Libraries
+
+```{r message=FALSE, warning=FALSE}
+library(sf)
+library(spatstat)
+library(tidyverse)
+library(leaflet)
+library(isdas)
+library(spdep)
+library(plotly)
+```
+
+```{r}
+data("Hamilton_CT")
+#data("HamiltonDAs") smaller dissemination areas
+Hamilton_CT <- st_set_crs(Hamilton_CT, 26917)
+```
+
+
+```{r}
+Shapefile = st_read("C:/Users/Josh/Desktop/4GA3/Applied-Spatial-Statistics-master/PollutionDataTest/AirData.shx")
+#Dataframe = as.data.frame(Shapefile)
+summary(Shapefile)
+```
+
+Plot. Stations are point data, but what we are interested is the concentrations (they are fields)
+
+```{r}
+ggplot() +
+  geom_sf(data = Hamilton_CT, fill = "gray", color = "black", alpha = 0.5, size = 0.3) +
+  geom_sf(data = Shapefile, aes(shape = POLLUTANT_)) +
+  coord_sf()
+```
+
+Leaflet (laggy)
+
+```{r}
+#leaflet(data = Shapefile) |>
+  #setView(lng = -79.86, lat = 43.25, zoom = 10) |>
+  #addTiles() |>
+  #addMarkers(data = Shapefile, ~LONGITUDE, ~LATITUDE)
+```
+
+Spatially continuous data
+I don't know how to deal with temporal data like this, so i chose NO2 pollutants with the enddate of 2022-02-21 as an example.
+Going through area data readings:
+
+```{r}
+dataEX = filter(filter(Shapefile, END_DATE == "2022-02-21"), POLLUTANT_ == "NO2")
+```
+
+
+```{r}
+ggplot() +
+  geom_sf(data = Hamilton_CT, fill = "gray", color = "black", alpha = 0.5, size = 0.3) +
+  geom_sf(data = dataEX, aes(color = CONCENTRAT, size = CONCENTRAT), alpha = 0.8) +
+  scale_color_distiller(palette = "YlOrRd", direction = 1) +
+  coord_sf()
+```
+
+```{r}
+plot_ly(data = dataEX, x = ~LONGITUDE, y = ~LATITUDE, z = ~CONCENTRAT, marker = list(color = ~CONCENTRAT, colorscale = c("Yellow", "Red"), showscale = TRUE)) |>
+  add_markers()
+```
+
+Interpolation methods: From lab
+
+```{r}
+#Create Voronoi polygons
+voronoiP = do.call(c, st_geometry(dataEX)) |>
+  st_voronoi() |>
+  st_collection_extract()
+voronoiP <- st_set_crs(voronoiP, 26917)
+
+#Replace point with polygon data
+poly_data <- dataEX
+poly_data$geometry = voronoiP[unlist(st_intersects(dataEX, voronoiP))] 
+
+#Bounding box does not work
+bbox = st_polygon(list(rbind(c(-80.2, 43.1), c(-79.5, 43.1), c(-79.5, 43.5), c(-80.2, 43.5), c(-80.2, 43.1)))) #|>
+  #st_as_sf(coords = c("x", "y"))
+#bbox <- st_set_crs(bbox, 26917)
+poly_data <- poly_data |>
+  st_intersection(bbox)
+
+#Plot Voronoi polygons (cannot find a way to )
+ggplot(poly_data) +
+  geom_sf(aes(fill = CONCENTRAT)) +
+  geom_sf(data = dataEX, size = 0.2) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1) +
+  #xlim(-79.5, -80.2) +
+  #ylim(43.5, 43.1) +
+  geom_sf(data = Hamilton_CT, fill = "gray", color = "black", alpha = 0.5, size = 0.3)
+
+```
+
+IDW
+
+```{r}
+#Create owin object
+#bbox = st_polygon(list(rbind(c(-80.2, 43.1), c(-79.5, 43.1), c(-79.5, 43.5), c(-80.2, 43.5), c(-80.2, 43.1)))) #Window causing issues agian
+BoxOwin = as.owin(bbox)
+
+#Create ppp object
+dataEX <- relocate(dataEX, CONCENTRAT, .after = LATITUDE)
+Datappp = as.ppp(X = dataEX[,6:8], W = BoxOwin)
+
+#Create IDW surface
+idw_map = idw(Datappp, power = 1.5)
+plot(idw_map)
+```
+
+k-point means (I dont even know)
+
+```{r}
+#Create prediction grid
+Target = expand.grid(x = seq(-80.2, -79.5, 0.01), y = seq(43.1, 43.5, 0.01)) |>
+  st_as_sf(coords = c("x", "y"))
+
+#Create k point means
+k_data = kpointmean(source_xy = dataEX, target_xy = Target, z = CONCENTRAT, k = 3) |>
+  rename(CONCENTRAT = z)
+
+#Plot
+ggplot() +
+  geom_sf(data = k_data, aes(color = CONCENTRAT)) +
+  scale_color_distiller(palette = "YlOrRd", direction = 1)
+```
+
