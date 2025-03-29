@@ -9,17 +9,11 @@ library(spdep)
 library(plotly)
 library(isdas)
 library(gstat)
+library(cartogram)
 ```
 
 ```{r}
-#data("Hamilton_CT")
-##data("HamiltonDAs") smaller dissemination areas
-#Hamilton_CT <- st_set_crs(Hamilton_CT, 26917)
-```
-
-
-```{r}
-#Import data
+#Import data ASK ABOUT PATHS
 AirData = st_read("C:/Users/Josh/Desktop/4GA3/Applied-Spatial-Statistics-master/PollutionDataTest/AirData/AirData.shx")
 summary(AirData)
 
@@ -42,6 +36,8 @@ Going through area data readings:
 
 ```{r}
 AdataEX = filter(filter(AirData, END_DATE == "2022-02-21"), POLLUTANT_ == "NO2")
+test = filter(filter(AirData, END_DATE == "2022-02-21"), POLLUTANT_ == "SO2")
+#FIND A WAY TO AVERAGE STATIONS (average different times together)
 ```
 
 Leaflet
@@ -113,9 +109,9 @@ BoxOwin = as.owin(bbox)
 AdataEX <- relocate(AdataEX, CONCENTRAT, .after = LATITUDE)
 Datappp = as.ppp(X = AdataEX[6:8], W = BoxOwin)
 
-#Create IDW surface
-idw_map = idw(Datappp, power = 1.5)
-plot(idw_map) #Ignore the long and lat maps, I have no idea why its doing that
+#Create IDW surface BROKEN
+#idw_map = idw(Datappp, power = 1.5)
+#plot(idw_map) #Ignore the long and lat maps, I have no idea why its doing that
 ```
 
 k-point means (I dont even know)
@@ -185,6 +181,16 @@ AdataEX$PredRes <- ifelse(Trend1$residuals > 0, "Positive", "Negative")
 ggplot(data = AdataEX, aes(x = X, y = Y, color = PredRes)) +
   geom_point() +
   coord_equal()
+
+#Morans I of residuals
+WeightList <- as.matrix(AdataEX[,6:7])
+WeightList <- subset(WeightList, select = -geometry)
+WeightList <- transform(WeightList, LONGITUDE = as.numeric(LONGITUDE), LATITUDE = as.numeric(LATITUDE))
+WeightList <-
+  knearneigh(WeightList, k = 3) |> 
+  knn2nb() |> 
+  nb2listw() 
+moran.test(x = Trend1$residuals, listw = WeightList)
 ```
 
 Linear looks the best, the others REALLY dont look good
@@ -236,3 +242,129 @@ plot_ly(x = ~Xseq, y = ~Yseq, z = ~Kpred, type = "surface", colors = "YlOrRd") |
 
 ```
 
+How to turn into an area data
+
+###HEALTH DATA START
+
+```{r}
+#Import
+COPDdata = st_read("C:/Users/Josh/Desktop/4GA3/Applied-Spatial-Statistics-master/PollutionDataTest/COPD/Hamilton_COPDdata.shx")
+summary(COPDdata)
+
+COPDdata$TOT35_Rate = COPDdata$COPD_T35 / COPDdata$TPOP_35
+```
+
+```{r}
+#Chloropleth
+ggplot(COPDdata) +
+  geom_sf(aes(fill = cut_number(TOT35_Rate, 5)), color = "black", size = 0.1) +
+  scale_fill_brewer(palette = "YlOrRd") +
+  coord_sf() +
+  labs(fill = "Rate of COPD for Total Population Over 35")
+
+#Cartogram version
+RateCarto = cartogram_cont(COPDdata, weight = "TOT35_Rate")
+ggplot(RateCarto) +
+  geom_sf(aes(fill = cut_number(TOT35_Rate, 5)), color = "black", size = 0.1) +
+  scale_fill_brewer(palette = "YlOrRd") +
+  coord_sf() +
+  labs(fill = "Rate of COPD for Total Population Over 35")
+```
+
+```{r}
+#Spatial Moving Average
+COPDweight = nb2listw(poly2nb(pl = COPDdata))
+RateSMA = lag.listw(x = COPDweight, COPDdata$TOT35_Rate)
+COPDdata <- left_join(COPDdata, data.frame(HNHB_ID = COPDdata$HNHB_ID, RateSMA), by = "HNHB_ID")
+
+#Plot
+ggplot() +
+  geom_sf(data = COPDdata, aes(fill = cut_number(RateSMA, 5)), color = "black") +
+  scale_fill_brewer(palette = "YlOrRd") +
+  labs(fill = "SMA of Rate of COPD for Total Population Over 35") +
+  coord_sf()
+```
+
+```{r}
+#Moran plot and test
+moran.test(COPDdata$TOT35_Rate, COPDweight)
+#moran.plot(COPDdata$TOT35_Rate, COPDweight, xlab = "Rate", ylab = "Lagged Rate") #STRANGE ERROR
+```
+
+```{r}
+#Local Moran
+RateLM = localmoran(COPDdata$TOT35_Rate, COPDweight)
+summary(RateLM)
+
+#Function
+localmoran.map <- function(p, listw, VAR, by){
+  # p is a simple features object
+  require(tidyverse)
+  require(spdep)
+  require(plotly)
+  
+  df_msc <- p |> 
+    rename(VAR = as.name(VAR),
+              key = as.name(by)) |>
+    transmute(key,
+              VAR,
+              Z = (VAR - mean(VAR)) / var(VAR),
+              SMA = lag.listw(listw, Z),
+              Type = case_when(Z < 0 & SMA < 0 ~ "LL",
+                               Z > 0 & SMA > 0 ~ "HH",
+                               TRUE ~ "HL/LH"))
+  
+  local_I <- localmoran(df_msc$VAR, listw)
+  
+  colnames(local_I) <- c("Ii", "E.Ii", "Var.Ii", "Z.Ii", "p.val")
+  
+  df_msc <- left_join(df_msc, 
+                      data.frame(key = df_msc$key, 
+                                 local_I),
+                      by = "key")
+  
+  plot_ly(df_msc) |>
+    add_sf(type = "scatter",
+           split = ~(p.val < 0.05), 
+           color = ~Type, 
+           colors = c("red", 
+                      "khaki1",
+                      "dodgerblue", 
+                      "dodgerblue4")) 
+}
+
+localmoran.map(COPDdata, COPDweight, "TOT35_Rate", by = "HNHB_ID")
+```
+
+```{r}
+#G*
+gistar.map <- function(p = p, listw = listw, VAR = VAR, by = by){
+require(tidyverse)
+require(spdep)
+require(sf)
+require(plotly)
+p <- mutate(p, key = p[[by]])
+df.lg <- localG(p[[VAR]], listw)
+df.lg <- as.numeric(df.lg)
+df.lg <- data.frame(Gstar = df.lg, p.val = 2 * pnorm(abs(df.lg), lower.tail = FALSE))
+df.lg <- mutate(df.lg,
+Type = case_when(Gstar < 0 & p.val <= 0.05 ~ "Low Concentration",
+Gstar > 0 & p.val <= 0.05 ~ "High Concentration",
+TRUE ~ "Not Signicant"))
+p <- left_join(p,
+data.frame(key = p[[by]], df.lg))
+plot_ly(p) |>
+add_sf(split = ~(p.val < 0.05), color = ~Type, colors = c("red", "dodgerblue", "gray"))
+}
+#Binary weights
+COPDbinW <- COPDdata |>
+st_centroid() |>
+dnearneigh(d1 = 0, d2 = 3) #Use disance of 3km
+COPDbinW <- nb2listw(include.self(COPDbinW), style = "B")
+
+#Plots
+#localG(COPDdata$TOT35_Rate, COPDbinW) #prob not useful to show stats
+gistar.map(p = COPDdata, listw = COPDbinW, VAR = "TOT35_Rate", by = "HNHB_ID")
+```
+
+DO CHAPTER 27 (regression models for multiple variables) AND 29 (remedial actions) ONCE YOU CAN COMBINE OTHER DATASET TO THIS ONE
