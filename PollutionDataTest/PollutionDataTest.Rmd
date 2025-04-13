@@ -520,6 +520,37 @@ summary(Reg1_SEM)
 #Moran test of SEN
 moran.test(Reg1_SEM$residuals, COPDweight, alternative = "less")
 ```
-We can see that the p value is now a relatively large number, which means that this remedial action has worked and Reg1_SEM will be our model. (I dont know what to do with it tho, do we just say it worked)
+We can see that the p value is now a relatively large number, which means that this remedial action has worked and Reg1_SEM will be our model. (not sure what to do with it tho)
 
+```{r}
+#Add SEM residuals to data frame
+COPDdata$SEM_Res <- Reg1_SEM$residuals
+#Plot of residuals with plotly
+plot_ly(COPDdata) |> 
+  add_sf(type = "scatter",
+         color = ~(SEM_Res > 0), 
+         colors = c("red", 
+                    "dodgerblue4"))
+```
 
+Can see less spatial autocorrelation.
+
+```{r}
+#Scatterplot of the 2 variables using SEM model
+ggplot(data = COPDdata, aes(x = AirAvg, y = TOT35_Rate)) + 
+  geom_point() +
+  geom_abline(slope = Reg1_SEM$coefficients[2],
+              intercept = Reg1_SEM$coefficients[1], 
+              color = "red", 
+              linewidth = 1) 
+
+#Scatterplot of the 2 variables OLD MODEL FOR COMPARISON
+ggplot(data = COPDdata, aes(x = AirAvg, y = TOT35_Rate)) + 
+  geom_point() +
+  geom_abline(slope = Reg1$coefficients[2],
+              intercept = Reg1$coefficients[1], 
+              color = "blue", 
+              linewidth = 1) 
+```
+
+You can see that the SEM slightly adjusted the line
