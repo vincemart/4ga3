@@ -8,6 +8,7 @@ library(here) # A Simpler Way to Find Your Files
 library(leaflet) # Create Interactive Web Maps with the JavaScript 'Leaflet' Library
 library(plotly) # Create Interactive Web Graphics via 'plotly.js'
 library(sf) # Simple Features for R
+library(spatialreg) # Spatial Regression Analysis 
 library(spatstat) # Spatial Point Pattern Analysis, Model-Fitting, Simulation, Tests
 library(spdep) # Spatial Dependence: Weighting Schemes, Statistics
 library(tidyverse) # Easily Install and Load the 'Tidyverse'
@@ -38,7 +39,7 @@ Going through area data readings:
 
 ```{r}
 AdataEX = filter(filter(AirData, END_DATE == "2022-02-21"), POLLUTANT_ == "NO2")
-test = filter(filter(AirData, END_DATE == "2022-02-21"), POLLUTANT_ == "SO2")
+test = filter(filter(AirData, END_DATE == "2022-10-27"), POLLUTANT_ == "NO2")
 #FIND A WAY TO AVERAGE STATIONS (average different times together)
 ```
 
@@ -107,6 +108,12 @@ Spatially continuous data
 ggplot() +
   geom_sf(data = City, fill = "gray", color = "black", alpha = 0.5, size = 0.3) +
   geom_sf(data = AdataEX, aes(color = CONCENTRAT, size = CONCENTRAT), alpha = 0.8) +
+  scale_color_distiller(palette = "YlOrRd", direction = 1) +
+  coord_sf()
+
+ggplot() +
+  geom_sf(data = City, fill = "gray", color = "black", alpha = 0.5, size = 0.3) +
+  geom_sf(data = test, aes(color = CONCENTRAT, size = CONCENTRAT), alpha = 0.8) +
   scale_color_distiller(palette = "YlOrRd", direction = 1) +
   coord_sf()
 ```
@@ -207,7 +214,7 @@ Choosing [trend] because ...:
 
 ```{r}
 #Interpolation grid
-xSeq = seq(-80.3, -79.5, 0.005)
+xSeq = seq(-80.3, -79.6, 0.005)
 ySeq = seq(43.0, 43.5, 0.005)
 Intergrid = expand.grid(X = Xseq, Y = Yseq)
 Intergrid <- mutate(Intergrid, X3 = X^3, X2Y = X^2 * Y, X2 = X^2, XY = X * Y, Y2 = Y^2, XY2 = X * Y^2, Y3 = Y^3)
@@ -281,7 +288,8 @@ ggplot(data = VariRes, aes(x = dist, y = gamma)) +
 Kriging
 ```{r}
 #Kriging 
-IntergridSF = Intergrid |> st_as_sf(coords = c("X", "Y"), remove = FALSE, crs = 26917)
+IntergridSF = Intergrid |> st_as_sf(coords = c("X", "Y"), remove = FALSE, crs = 4326) |>
+  st_transform(26917)
 IntergridSF <- mutate(IntergridSF, X3 = X^3, X2Y = X^2 * Y, X2 = X^2, XY = X * Y, Y2 = Y^2, XY2 = X * Y^2, Y3 = Y^3) #in case of model change
 KrigModel = krige(CONCENTRAT ~ X + Y, filter(AdataEX, OBJECTID != 6), IntergridSF, VariRes_Th) #Bandaid fix, filter out duplicate using object id. Using higher order polynomials still does not work well
 
@@ -419,6 +427,99 @@ COPDbinW <- nb2listw(include.self(COPDbinW), style = "B")
 gistar.map(p = COPDdata, listw = COPDbinW, VAR = "TOT35_Rate", by = "HNHB_ID")
 ```
 
-DO CHAPTER 27 (regression models for multiple variables) AND 29 (remedial actions) ONCE YOU CAN COMBINE OTHER DATASET TO THIS ONE
+This is the part will I will turn the prediction grid from the Kriging interpolation method (have justification on why this method was chosen) into areas data that we can use to compare with the COPD data
+
+```{r}
+#Remove negatives from the new prediction dataframe
+PredictData <- KrigModel[-2]
+PredictData$var1.pred[PredictData$var1.pred < 0] <- 0
+PredictData <- st_transform(PredictData, 26917)
+
+ggplot() +
+  geom_sf(data = City, fill = "gray", color = "black", alpha = 1, size = 0.3) +
+  geom_sf(data = PredictData, aes(color = var1.pred), alpha = 0.5) +
+  coord_sf()
+
+#Join with boundaries
+JoinData = st_join(PredictData, City)
+
+#Find averages for each polygon
+JoinAvg <- JoinData |>
+  group_by(HNHB_ID) |>
+  summarize(Avg_CONTAM = mean(var1.pred))
+JoinAvg <- JoinAvg[c(-25),]
+
+#Add onto COPDdata
+COPDdata <- left_join(COPDdata, data.frame(HNHB_ID = COPDdata$HNHB_ID, JoinAvg$Avg_CONTAM), by = "HNHB_ID")
+COPDdata <- rename(COPDdata, AirAvg = JoinAvg.Avg_CONTAM)
+```
+
+Map the interpolated area data for air pollution
+```{r}
+#Chloropleth
+ggplot(COPDdata) +
+  geom_sf(aes(fill = cut_number(AirAvg, 5)), color = "black", size = 0.1) +
+  scale_fill_brewer(palette = "YlOrRd") +
+  coord_sf() +
+  labs(fill = "Interpolated Average Air Pollution (UNITS)")
+```
+
+
+DO CHAPTER 27 (regression models for multiple variables) AND 29 (remedial actions)
+Simple regression analysis of the two variables
+```{r}
+#Simple regression model
+Reg1 = lm(formula = TOT35_Rate ~ AirAvg, data = COPDdata)
+summary(Reg1)
+
+#Scatterplot of the 2 variables
+ggplot(data = COPDdata, aes(x = AirAvg, y = TOT35_Rate)) + 
+  geom_point() +
+  geom_abline(slope = Reg1$coefficients[2],
+              intercept = Reg1$coefficients[1], 
+              color = "blue", 
+              linewidth = 1) 
+
+#Autocorrelation analysis to diagnose model
+COPDdata$Reg1_Res <- Reg1$residuals
+```
+
+```{r}
+
+#Plot of residuals with plotly
+plot_ly(COPDdata) |> 
+  add_sf(type = "scatter",
+         color = ~(Reg1_Res > 0), 
+         colors = c("red", 
+                    "dodgerblue4"))
+```
+
+Showing signs of spatical autocorrelation. not good.
+
+```{r}
+#Moran's I analysis of residuals
+moran.test(COPDdata$Reg1_Res, COPDweight)
+```
+
+The p value is not too small but still too small, indicating spatial correlation in the residuals and not randomness.
+Test different transformations to find a better model:
+```{r}
+#Log transformation model
+Reg2 = lm(formula = log(TOT35_Rate) ~ AirAvg, data = COPDdata)
+summary(Reg2)
+COPDdata$Reg2_Res <- Reg2$residuals
+moran.test(COPDdata$Reg2_Res, COPDweight)
+```
+P value still not much better, we dont have any other variables to include, so try remedial action:
+Out of the remediation methods presented, Geographically weighted regression and Spatial error model seem to be more doable. Might avoid using GWR due to its caveat of being better with larger datasets, and out dataset is relatively tiny (also Paez says it should only be used for prediction, which I dont think is what we are doing). So SEM it is. I HAD TO INSTALL spatialreg.
+
+```{r}
+#Spatial Error Model remediation
+Reg1_SEM = errorsarlm(formula = TOT35_Rate ~ AirAvg, data = COPDdata, listw = COPDweight)
+summary(Reg1_SEM)
+#Moran test of SEN
+moran.test(Reg1_SEM$residuals, COPDweight, alternative = "less")
+```
+We can see that the p value is now a relatively large number, which means that this remedial action has worked and Reg1_SEM will be our model. (I dont know what to do with it tho, do we just say it worked)
 
 
