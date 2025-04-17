@@ -1,0 +1,473 @@
+Libraries
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(cartogram) # Create Cartograms with R
+library(gstat) # Spatial and Spatio-Temporal Geostatistical Modelling, Prediction and Simulation
+library(glue) # Interpreted String Literals
+library(here) # A Simpler Way to Find Your Files
+library(leaflet) # Create Interactive Web Maps with the JavaScript 'Leaflet' Library
+library(plotly) # Create Interactive Web Graphics via 'plotly.js'
+library(sf) # Simple Features for R
+library(spatialreg) # Spatial Regression Analysis 
+library(spatstat) # Spatial Point Pattern Analysis, Model-Fitting, Simulation, Tests
+library(spdep) # Spatial Dependence: Weighting Schemes, Statistics
+library(tidyverse) # Easily Install and Load the 'Tidyverse'
+library(units) # Measurement Units for R Vectors
+library(ggmap)
+```
+
+```{r, echo=FALSE}
+#Import data ASK ABOUT PATHS
+AirData = st_read(glue::glue(here::here(), "/data-raw/AirData/AirData.shx")) 
+summary(AirData)
+
+City = st_read(glue::glue(here::here(), "/data-raw/Hamilton/City_neighbourhoods.shx"))
+City <- st_transform(City, 26917)
+st_crs(City)
+```
+
+```{r, echo = }
+no2 <- filter(filter(AirData,
+                     END_DATE == "2023-03-15" |
+                       END_DATE == "2023-03-16"|
+                       END_DATE == "2022-03-15"|
+                       END_DATE == "2022-03-16"), 
+              POLLUTANT_ == "NO2")
+
+so2 <- filter(filter(AirData,
+                     END_DATE == "2023-03-15" |
+                       END_DATE == "2023-03-16"|
+                       END_DATE == "2022-03-15"|
+                       END_DATE == "2022-03-16"), 
+              POLLUTANT_ == "SO2")
+
+no2$SE_ANNO_CA <- NULL
+no2$POLLUTANT_ <- NULL
+no2$OBJECTID <- NULL
+no2$UNIT <- NULL
+no2$START_DATE <- NULL
+no2$END_DATE <- NULL
+
+so2$SE_ANNO_CA <- NULL
+so2$POLLUTANT_ <- NULL
+so2$OBJECTID <- NULL
+so2$UNIT <- NULL
+so2$START_DATE <- NULL
+so2$END_DATE <- NULL
+
+no2 <- aggregate(no2, by = list(no2$LATITUDE), mean)
+so2 <- aggregate(so2, by= list(so2$LATITUDE), mean)
+
+
+```
+
+Let us give a unique ID to the location of the station:
+
+```{r}
+station_id <- no2 |>
+  distinct(geometry) |>
+  mutate(station_id = 1:n(),
+         station_id = factor(station_id))
+
+no2 <- no2 |>
+  st_join(station_id)
+
+so2 <- so2 |>
+  st_join(station_id)
+
+
+#join station id by latitude
+```
+
+After creating unique station ids, join to the AirData:
+
+```{r}
+ggplot() +
+  geom_sf(data = City, fill = "gray", color = "black", alpha = 0.5, size = 0.3,) +
+  geom_sf(data = station_id) +
+  coord_sf()
+```
+
+Examination of the table shows that measurement of pollutants is not continuous which means that averages over time are not appropriate. Select a single two-week period for the project. Probably, the one with most observations by pollutant:
+
+```{r}
+AirData |>
+  st_drop_geometry() |>
+  filter(POLLUTANT_=="NO2") |>
+  group_by(END_DATE) |>
+  summarize(n_stations = n(),
+            .groups = "drop") |>
+  arrange(desc(n_stations))
+```
+
+Spatially continuous data
+
+```{r}
+
+map <-get_googlemap("Hamilton, Ontario") 
+  
+ggplot() +
+  geom_sf(data = City, fill = "gray", color = "black", alpha = 0.5, size = 0.3) +
+  geom_sf(data = no2, aes(color = CONCENTRAT, size = CONCENTRAT), alpha = 0.8) +
+  scale_color_distiller(palette = "YlOrRd", direction = 1) +
+  coord_sf()
+
+```
+
+Trend Surface Estimations
+
+```{r}
+no2 <- mutate(no2, X3 = LONGITUDE^3, X2Y = LONGITUDE^2 * LATITUDE, X2 = LATITUDE^2, XY = LONGITUDE * LATITUDE, Y2 = LATITUDE^2, XY2 = LONGITUDE * LATITUDE^2, Y3 = LATITUDE^3, X = LONGITUDE, Y = LATITUDE)
+
+#Linear polynomial
+Trend1 = lm(formula = CONCENTRAT ~ X + Y, data = no2)
+summary(Trend1)
+
+#Quadratic polynomial
+Trend2 = lm(formula = CONCENTRAT ~ X2 + X + XY + Y + Y2, data = no2)
+summary(Trend2)
+
+#Cubic polynomial
+Trend3 = lm(formula = CONCENTRAT ~ X3 + X2Y + X2 + X + XY + Y + Y2 + XY2 + Y3, data = no2)
+summary(Trend3)
+
+```
+
+Choosing [trend] because ...:
+
+```{r}
+#Interpolation grid
+Xseq = seq(-80.3, -79.6, 0.005)
+Yseq = seq(43.0, 43.5, 0.005)
+Intergrid = expand.grid(X = Xseq, Y = Yseq)
+Intergrid <- mutate(Intergrid, X3 = X^3, X2Y = X^2 * Y, X2 = X^2, XY = X * Y, Y2 = Y^2, XY2 = X * Y^2, Y3 = Y^3)
+Prediction <- predict(Trend1, newdata = Intergrid, se.fit = TRUE, interval = "prediction", level = 0.95)
+summary(Prediction$fit)
+```
+
+```{r}
+#lm Surface Interpolation
+Zp = matrix(data = Prediction$fit[,1], nrow = 101, ncol = 161, byrow = TRUE)
+Zp_low = matrix(data = Prediction$fit[,2], nrow = 101, ncol = 161, byrow = TRUE)
+Zp_high = matrix(data = Prediction$fit[,3], nrow = 101, ncol = 161, byrow = TRUE)
+
+#Plot 3D
+plot_ly(x = ~Xseq, y = ~Yseq, z = ~Zp, type = "surface", colors = "YlOrRd") |>
+  add_surface(x = ~Xseq, y = ~Yseq, z = ~Zp_low, opacity = 0.5, showscale = FALSE) |>
+  add_surface(x = ~Xseq, y = ~Yseq, z = ~Zp_high, opacity = 0.5, showscale = FALSE) |>
+  layout(scene = list(aspectmode = "manual", aspectratio = list(x = 1, y = 1, z = 1)))
+
+#Create add residuals to dataframe
+no2$PredRes <- ifelse(Trend1$residuals > 0, "Positive", "Negative")
+
+#Plot residuals
+ggplot(data = no2, aes(x = X, y = Y, color = PredRes)) +
+  geom_point() +
+  coord_equal()
+
+#Morans I of residuals
+WeightList <- as.matrix(no2[,6:7])
+WeightList <- subset(WeightList, select = -geometry)
+WeightList <- transform(WeightList, LONGITUDE = as.numeric(LONGITUDE), LATITUDE = as.numeric(LATITUDE))
+WeightList <-
+  knearneigh(WeightList, k = 3) |> 
+  knn2nb() |> 
+  nb2listw() 
+moran.test(x = Trend1$residuals, listw = WeightList)
+```
+
+Linear looks the best, the others REALLY dont look good
+
+Semivariogram
+
+```{r}
+#Get semivariogram of data set
+Vari = variogram(CONCENTRAT ~ 1, data = no2)
+#Plot
+ggplot(data = Vari, aes(x = dist, y = gamma)) + 
+  geom_point() + 
+  geom_text(aes(label = np), nudge_y = -2) + 
+  xlab("Distance") +
+  ylab("Semivariance")
+```
+
+```{r}
+#Semivariogram of the residuals 
+no2$TrendRes <- Trend3$residuals
+VariRes = variogram(TrendRes ~ 1, data = no2)
+
+#Get best fitting model
+VariRes_Th = fit.variogram(VariRes, model = vgm("Exp","Gau","Sph"))
+VariRes_Th
+
+Fit_line <- variogramLine(VariRes_Th, maxdist = 15000)
+ggplot(data = VariRes, aes(x = dist, y = gamma)) + 
+  geom_point() + 
+  geom_text(aes(label = np), nudge_y = -2) + 
+  geom_line(data = Fit_line, aes(x = dist, y = gamma)) +
+  xlab("Distance") +
+  ylab("Semivariance")
+```
+
+Kriging
+
+```{r}
+#Kriging 
+IntergridSF = Intergrid |> st_as_sf(coords = c("X", "Y"), remove = FALSE, crs = 4326) |>
+  st_transform(26917)
+IntergridSF <- mutate(IntergridSF, X3 = X^3, X2Y = X^2 * Y, X2 = X^2, XY = X * Y, Y2 = Y^2, XY2 = X * Y^2, Y3 = Y^3) #in case of model change
+KrigModel = krige(as.formula(Trend1), no2, IntergridSF, VariRes_Th) #Bandaid fix, filter out duplicate using object id. Using higher order polynomials still does not work well
+
+#Extract results
+Kpred = matrix(data = KrigModel$var1.pred, nrow = 101, ncol = 161, byrow = TRUE) #ISSUE: does not work when there are points in the data with same coordinates
+
+#Plot interpolation
+
+```
+
+How to turn into an area data: take points and intersect/join with polygons, group by zone, get average.
+
+###HEALTH DATA START
+
+```{r}
+#Import
+COPDdata = st_read(glue::glue(here::here(), "/data-raw//COPD/Hamilton_COPDdata.shx"))
+summary(COPDdata)
+
+COPDdata$TOT35_Rate = COPDdata$COPD_T35 / COPDdata$TPOP_35
+```
+
+```{r}
+#Chloropleth
+ggplot(COPDdata) +
+  geom_sf(aes(fill = cut_number(TOT35_Rate, 5)), color = "black", size = 0.1) +
+  scale_fill_brewer(palette = "YlOrRd") +
+  coord_sf() +
+  labs(fill = "Rate of COPD for Total Population Over 35")
+
+```
+
+```{r}
+#Spatial Moving Average
+COPDweight = nb2listw(poly2nb(pl = COPDdata))
+RateSMA = lag.listw(x = COPDweight, COPDdata$TOT35_Rate)
+COPDdata <- left_join(COPDdata, data.frame(HNHB_ID = COPDdata$HNHB_ID, RateSMA), by = "HNHB_ID")
+
+#Plot
+ggplot() +
+  geom_sf(data = COPDdata, aes(fill = cut_number(RateSMA, 5)), color = "black") +
+  scale_fill_brewer(palette = "YlOrRd") +
+  labs(fill = "SMA of Rate of COPD for Total Population Over 35") +
+  coord_sf()
+```
+
+```{r}
+#Moran plot and test
+moran.test(COPDdata$TOT35_Rate, COPDweight)
+#moran.plot(COPDdata$TOT35_Rate, COPDweight, xlab = "Rate", ylab = "Lagged Rate") #STRANGE ERROR
+```
+
+```{r}
+#Local Moran
+RateLM = localmoran(COPDdata$TOT35_Rate, COPDweight)
+summary(RateLM)
+
+#Function
+localmoran.map <- function(p, listw, VAR, by){
+  # p is a simple features object
+  require(tidyverse) # Easily Install and Load the 'Tidyverse'
+  require(spdep) # Spatial Dependence: Weighting Schemes, Statistics
+  require(plotly) # Create Interactive Web Graphics via 'plotly.js'
+  
+  df_msc <- p |> 
+    rename(VAR = as.name(VAR),
+              key = as.name(by)) |>
+    transmute(key,
+              VAR,
+              Z = (VAR - mean(VAR)) / var(VAR),
+              SMA = lag.listw(listw, Z),
+              Type = case_when(Z < 0 & SMA < 0 ~ "LL",
+                               Z > 0 & SMA > 0 ~ "HH",
+                               TRUE ~ "HL/LH"))
+  
+  local_I <- localmoran(df_msc$VAR, listw)
+  
+  colnames(local_I) <- c("Ii", "E.Ii", "Var.Ii", "Z.Ii", "p.val")
+  
+  df_msc <- left_join(df_msc, 
+                      data.frame(key = df_msc$key, 
+                                 local_I),
+                      by = "key")
+  
+  plot_ly(df_msc) |>
+    add_sf(type = "scatter",
+           split = ~(p.val < 0.05), 
+           color = ~Type, 
+           colors = c("red", 
+                      "khaki1",
+                      "dodgerblue", 
+                      "dodgerblue4")) 
+}
+
+localmoran.map(COPDdata, COPDweight, "TOT35_Rate", by = "HNHB_ID")
+```
+
+```{r}
+#G*
+gistar.map <- function(p = p, listw = listw, VAR = VAR, by = by){
+require(tidyverse) # Easily Install and Load the 'Tidyverse'
+require(spdep) # Spatial Dependence: Weighting Schemes, Statistics
+require(sf) # Simple Features for R
+require(plotly) # Create Interactive Web Graphics via 'plotly.js'
+p <- mutate(p, key = p[[by]])
+df.lg <- localG(p[[VAR]], listw)
+df.lg <- as.numeric(df.lg)
+df.lg <- data.frame(Gstar = df.lg, p.val = 2 * pnorm(abs(df.lg), lower.tail = FALSE))
+df.lg <- mutate(df.lg,
+Type = case_when(Gstar < 0 & p.val <= 0.05 ~ "Low Concentration",
+Gstar > 0 & p.val <= 0.05 ~ "High Concentration",
+TRUE ~ "Not Signicant"))
+p <- left_join(p,
+data.frame(key = p[[by]], df.lg))
+plot_ly(p) |>
+add_sf(split = ~(p.val < 0.05), color = ~Type, colors = c("red", "dodgerblue", "gray"))
+}
+#Binary weights
+COPDbinW <- COPDdata |>
+st_centroid() |>
+dnearneigh(d1 = 0, d2 = 3) #Use disance of 3km
+COPDbinW <- nb2listw(include.self(COPDbinW), style = "B")
+
+#Plots
+#localG(COPDdata$TOT35_Rate, COPDbinW) #prob not useful to show stats
+gistar.map(p = COPDdata, listw = COPDbinW, VAR = "TOT35_Rate", by = "HNHB_ID")
+```
+
+This is the part will I will turn the prediction grid from the Kriging interpolation method (have justification on why this method was chosen) into areas data that we can use to compare with the COPD data
+
+```{r}
+#Remove negatives from the new prediction dataframe
+PredictData <- KrigModel[-2]
+PredictData$var1.pred[PredictData$var1.pred < 0] <- 0
+PredictData <- st_transform(PredictData, 26917)
+
+ggplot() +
+  geom_sf(data = City, fill = "gray", color = "black", alpha = 1, size = 0.3) +
+  geom_sf(data = PredictData, aes(color = var1.pred), alpha = 0.5) +
+  coord_sf()
+
+#Join with boundaries
+JoinData = st_join(PredictData, City)
+
+#Find averages for each polygon
+JoinAvg <- JoinData |>
+  group_by(HNHB_ID) |>
+  summarize(Avg_CONTAM = mean(var1.pred))
+JoinAvg <- JoinAvg[c(-25),]
+
+#Add onto COPDdata
+COPDdata <- left_join(COPDdata, data.frame(HNHB_ID = COPDdata$HNHB_ID, JoinAvg$Avg_CONTAM), by = "HNHB_ID")
+COPDdata <- rename(COPDdata, AirAvg = JoinAvg.Avg_CONTAM)
+```
+
+Map the interpolated area data for air pollution
+
+```{r}
+#Chloropleth
+ggplot(COPDdata) +
+  geom_sf(aes(fill = cut_number(AirAvg, 5)), color = "black", size = 0.1) +
+  scale_fill_brewer(palette = "YlOrRd") +
+  coord_sf() +
+  labs(fill = "Interpolated Average Air Pollution (UNITS)")
+```
+
+DO CHAPTER 27 (regression models for multiple variables) AND 29 (remedial actions) Simple regression analysis of the two variables
+
+```{r}
+#Simple regression model
+Reg1 = lm(formula = TOT35_Rate ~ AirAvg, data = COPDdata)
+summary(Reg1)
+
+#Scatterplot of the 2 variables
+ggplot(data = COPDdata, aes(x = AirAvg, y = TOT35_Rate)) + 
+  geom_point() +
+  geom_abline(slope = Reg1$coefficients[2],
+              intercept = Reg1$coefficients[1], 
+              color = "blue", 
+              linewidth = 1) 
+
+#Autocorrelation analysis to diagnose model
+COPDdata$Reg1_Res <- Reg1$residuals
+```
+
+```{r}
+
+#Plot of residuals with plotly
+plot_ly(COPDdata) |> 
+  add_sf(type = "scatter",
+         color = ~(Reg1_Res > 0), 
+         colors = c("red", 
+                    "dodgerblue4"))
+```
+
+Showing signs of spatical autocorrelation. not good.
+
+```{r}
+#Moran's I analysis of residuals
+moran.test(COPDdata$Reg1_Res, COPDweight)
+```
+
+The p value is not too small but still too small, indicating spatial correlation in the residuals and not randomness. Test different transformations to find a better model:
+
+```{r}
+#Log transformation model
+Reg2 = lm(formula = log(TOT35_Rate) ~ AirAvg, data = COPDdata)
+summary(Reg2)
+COPDdata$Reg2_Res <- Reg2$residuals
+moran.test(COPDdata$Reg2_Res, COPDweight)
+```
+
+P value still not much better, we dont have any other variables to include, so try remedial action: Out of the remediation methods presented, Geographically weighted regression and Spatial error model seem to be more doable. Might avoid using GWR due to its caveat of being better with larger datasets, and out dataset is relatively tiny (also Paez says it should only be used for prediction, which I dont think is what we are doing). So SEM it is. I HAD TO INSTALL spatialreg.
+
+```{r}
+#Spatial Error Model remediation
+Reg1_SEM = errorsarlm(formula = TOT35_Rate ~ AirAvg, data = COPDdata, listw = COPDweight)
+summary(Reg1_SEM)
+#Moran test of SEN
+moran.test(Reg1_SEM$residuals, COPDweight, alternative = "less")
+```
+
+We can see that the p value is now a relatively large number, which means that this remedial action has worked and Reg1_SEM will be our model. (not sure what to do with it tho)
+
+```{r}
+#Add SEM residuals to data frame
+COPDdata$SEM_Res <- Reg1_SEM$residuals
+#Plot of residuals with plotly
+plot_ly(COPDdata) |> 
+  add_sf(type = "scatter",
+         color = ~(SEM_Res > 0), 
+         colors = c("red", 
+                    "dodgerblue4"))
+```
+
+Can see less spatial autocorrelation.
+
+```{r}
+#Scatterplot of the 2 variables using SEM model
+ggplot(data = COPDdata, aes(x = AirAvg, y = TOT35_Rate)) + 
+  geom_point() +
+  geom_abline(slope = Reg1_SEM$coefficients[2],
+              intercept = Reg1_SEM$coefficients[1], 
+              color = "red", 
+              linewidth = 1) 
+
+#Scatterplot of the 2 variables OLD MODEL FOR COMPARISON
+ggplot(data = COPDdata, aes(x = AirAvg, y = TOT35_Rate)) + 
+  geom_point() +
+  geom_abline(slope = Reg1$coefficients[2],
+              intercept = Reg1$coefficients[1], 
+              color = "blue", 
+              linewidth = 1) 
+```
+
+You can see that the SEM slightly adjusted the line
